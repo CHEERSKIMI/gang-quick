@@ -1,6 +1,7 @@
 {
   "0x608f17dd1689847cb0ec8d9d009b0f7c91c7451b": {
     "symbol": "SMK5C",
+    "chain": "bsc",
     "costBnb": 0.05,
     "auto": {
       "enabled": true,
@@ -11,5 +12,10 @@
       "tpDone": false,
       "slDone": false
     }
+  },
+  "0xcb1df013265c283e4cb5a546623e20e86af0813e": {
+    "symbol": "CAP",
+    "chain": "rh",
+    "costBnb": 0
   }
 }

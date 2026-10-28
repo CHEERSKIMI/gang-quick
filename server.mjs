@@ -167,6 +167,107 @@ async function sendContract({ to, valueWei = '0', inputData, label }) {
   return { status: ex.status, txHash: ex.txHash || null, sim: pre.simulationResult };
 }
 
+// ---------- 多网络：Robinhood Chain（mobster.meme，走 mobster CLI）+ Solana ----------
+const MOBSTER_BAW = process.env.MOBSTER_BAW || 'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\store\\v11\\links\\@binance\\agentic-wallet\\1.11.0\\52b7c8749335ffe66ec06014f9984df54a950ce82955bf6c18d464f0eee3bc10\\node_modules\\@binance\\agentic-wallet\\dist\\index.js';
+const MOBSTER_V3_PAD = process.env.MOBSTER_V3_PAD || '0x4ED0f046D97d508df86D6B7B058E763DbFb0027f';
+const MOBSTER_ROUTER = process.env.MOBSTER_ROUTER || '0x481F370040084ED9977b6ED4140b3188d95CaDCf';
+const RH_RPC = process.env.MOBSTER_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
+const RH_CHAIN = '4663', SOL_CHAIN = 'CT_501';
+
+function mobster(args, { timeoutMs = 150_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, MOBSTER_BAW, MOBSTER_V3_PAD, MOBSTER_ROUTER };
+    env.PATH = buildPath();
+    const child = execFile('mobster', [...args], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env, shell: true }, (err, stdout, stderr) => {
+      const text = String(stdout || '').trim();
+      let j = null; try { j = JSON.parse(text); } catch {}
+      if (err) return reject(new Error((j?.error) || String(stderr || err.message).slice(0, 400)));
+      if (!j) return reject(new Error('mobster_bad_json: ' + text.slice(0, 200)));
+      resolve(j);
+    });
+    child.on('error', reject);
+  });
+}
+async function rhTokenInfo(token) {
+  try {
+    const r = await fetch('https://mobster.meme/api/tokens/' + token, { headers: { accept: 'application/json' } });
+    if (r.status === 200) { const j = await r.json(); if (j?.address) return j; }
+  } catch {}
+  return null;
+}
+async function rhTokenBalance(token) {
+  try {
+    const r = await fetch(RH_RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: token, data: sel('balanceOf(address)') + padAddr(FROM) }, 'latest'] }) });
+    const j = await r.json();
+    return Number(BigInt(j.result)) / 1e18;
+  } catch { return 0; }
+}
+async function rhEthBalance() {
+  return cacheGet('rhEth', 30_000, async () => {
+    try { const j = await baw(['wallet', 'balance', '--binanceChainId', RH_CHAIN], { timeoutMs: 20000 }); return Number(j.data?.find((x) => x.symbol === 'ETH')?.balance || 0); } catch { return 0; }
+  });
+}
+async function solBalance() {
+  try { const j = await baw(['wallet', 'balance', '--binanceChainId', SOL_CHAIN], { timeoutMs: 20000 }); return j.data || []; } catch { return []; }
+}
+// RH 买入：mobster v3 buy（预览）→ execute
+async function rhBuy(token, eth) {
+  const pre = await mobster(['v3', 'buy', '--token', token, '--amount', String(eth)]);
+  if (!pre.success) throw new Error(pre.error || '预览失败');
+  const ex = await mobster(['execute', '--request-id', pre.requestId]);
+  return { status: ex.status, txHash: ex.txHash, expectTokens: pre.expectTokens, requestId: pre.requestId };
+}
+// RH 卖出
+async function rhSell(token, pct) {
+  const bal = await rhTokenBalance(token);
+  if (!(bal > 0)) throw new Error('没有可卖余额');
+  const args = pct >= 100 ? ['v3', 'sell', '--token', token, '--all'] : ['v3', 'sell', '--token', token, '--amount', String(bal * pct / 100)];
+  const pre = await mobster(args);
+  if (!pre.success) throw new Error(pre.error || '预览失败');
+  const ex = await mobster(['execute', '--request-id', pre.requestId]);
+  return { status: ex.status, txHash: ex.txHash, sold: pct >= 100 ? bal : (bal * pct / 100) };
+}
+
+// ---------- Solana ----------
+const SOL_NATIVE = 'So11111111111111111111111111111111111111111';
+async function solBalances() {
+  return cacheGet('solBal', 30_000, async () => {
+    try { const j = await baw(['wallet', 'balance', '--binanceChainId', SOL_CHAIN], { timeoutMs: 20000 }); return j.data || []; } catch { return []; }
+  });
+}
+async function solAddress() {
+  return cacheGet('solAddr', 300_000, async () => {
+    try { const j = await baw(['wallet', 'address'], { timeoutMs: 20000 }); return j.data?.addresses?.find((a) => a.binanceChainId === 'CT_501')?.address || ''; } catch { return ''; }
+  });
+}
+async function solTokenInfo(mint) {
+  try {
+    const r = await fetch('https://api.dexscreener.com/latest/dex/tokens/' + mint, { headers: { accept: 'application/json' } });
+    const j = await r.json();
+    const pair = (j.pairs || []).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+    if (!pair) return null;
+    return {
+      symbol: pair.baseToken?.symbol || 'TOKEN',
+      name: pair.baseToken?.name || '',
+      priceUsd: Number(pair.priceUsd || 0),
+      priceNative: Number(pair.priceNative || 0),
+      liquidityUsd: Number(pair.liquidity?.usd || 0),
+      volume24hUsd: Number(pair.volume?.h24 || 0),
+      pair: pair.pairAddress || null,
+      dexId: pair.dexId || null,
+    };
+  } catch { return null; }
+}
+async function solSwap(fromQty, fromToken, toToken, slippage = 3) {
+  const j = await baw(['market-order', 'swap', '--fromTokenQty', String(fromQty), '--fromToken', fromToken, '--toToken', toToken, '--binanceChainId', SOL_CHAIN, '--slippage', String(slippage)]);
+  return j.data || {};
+}
+async function solTokenBalance(mint) {
+  const bal = await solBalances();
+  const hit = bal.find((x) => String(x.address || '').toLowerCase() === String(mint).toLowerCase());
+  return Number(hit?.balance || 0);
+}
+
 // ---------- 曲线 ----------
 async function findPad(token) {
   for (const [pad, name] of Object.entries(PADS)) {
@@ -269,18 +370,67 @@ async function getBnbUsd() {
   });
 }
 
+// ---------- ETH 的 USDT 价 ----------
+async function getEthUsd() {
+  return cacheGet('ethUsd', 60_000, async () => {
+    try {
+      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT', { signal: AbortSignal.timeout(5000) });
+      const j = await r.json();
+      if (Number(j?.price) > 0) return Number(j.price);
+    } catch {}
+    return 2350;
+  });
+}
+// ---------- SOL 的 USDT 价 ----------
+async function getSolUsd() {
+  return cacheGet('solUsd', 60_000, async () => {
+    try {
+      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', { signal: AbortSignal.timeout(5000) });
+      const j = await r.json();
+      if (Number(j?.price) > 0) return Number(j.price);
+    } catch {}
+    return 200;
+  });
+}
+
 // ---------- 核心：状态（余额 + 持仓） ----------
-async function getState() {
+async function getState(chain = 'bsc') {
   const { status, addr } = cachedWallet();
+  const pos = loadPos();
+
+  if (chain === 'rh') {
+    const [eth, ethUsd] = await Promise.all([rhEthBalance(), getEthUsd()]);
+    const positions = [];
+    for (const [token, p] of Object.entries(pos)) {
+      if ((p.chain || 'bsc') !== 'rh') continue;
+      const bal = await rhTokenBalance(token);
+      const info = await rhTokenInfo(token);
+      const value = bal * Number(info?.price || 0);
+      const cost = Number(p.costBnb || 0);
+      const pnl = value - cost;
+      const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
+      positions.push({ token, symbol: p.symbol || info?.symbol || 'TOKEN', balance: bal, costBnb: cost, valueBnb: value, pnlBnb: pnl, pnlPct,
+        costUsd: cost * ethUsd, valueUsd: value * ethUsd, pnlUsd: pnl * ethUsd, chain: 'rh' });
+    }
+    return { chain: 'rh', addr, status, eth, ethUsd, positions };
+  }
+
+  if (chain === 'sol') {
+    const [bal, saddr, solUsd] = await Promise.all([solBalances(), solAddress(), getSolUsd()]);
+    const sol = Number(bal.find((x) => x.symbol === 'SOL')?.balance || 0);
+    return { chain: 'sol', addr: saddr || addr, status, sol, solUsd, positions: [] };
+  }
+
+  // BSC（默认）
   const [bnb, wbnb, usdt, bnbUsd] = await Promise.all([
     rpc('eth_getBalance', [addr, 'latest']).then((x) => Number(BigInt(x)) / 1e18).catch(() => 0),
     call(WBNB, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
     call(USDT, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
     getBnbUsd(),
   ]);
-  const pos = loadPos();
   const positions = [];
   for (const [token, p] of Object.entries(pos)) {
+    if ((p.chain || 'bsc') !== 'bsc') continue;
     let bal = 0n, valueBnb = 0, symbol = p.symbol || 'TOKEN';
     const pi = await padInfo(token);
     // balanceOf 与 curves 并行，省一半往返
@@ -301,9 +451,9 @@ async function getState() {
     const pnl = valueBnb - cost;
     const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
     positions.push({ token, symbol, balance: Number(bal) / 1e18, costBnb: cost, valueBnb, pnlBnb: pnl, pnlPct,
-      costUsd: cost * bnbUsd, valueUsd: valueBnb * bnbUsd, pnlUsd: pnl * bnbUsd, auto: p.auto || null });
+      costUsd: cost * bnbUsd, valueUsd: valueBnb * bnbUsd, pnlUsd: pnl * bnbUsd, auto: p.auto || null, chain: 'bsc' });
   }
-  return { addr, status, bnb, wbnb, usdt, bnbUsd, positions };
+  return { chain: 'bsc', addr, status, bnb, wbnb, usdt, bnbUsd, positions };
 }
 
 // ---------- 卖出（手动 + 自动策略共用） ----------
@@ -387,10 +537,31 @@ const server = createServer(async (req, res) => {
   if (p.startsWith('/api/') && req.method === 'POST') console.log(`[api] ${req.method} ${p}`);
   try {
     if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(HTML); }
-    if (p === '/api/state') return ok(res, await getState());
+    if (p === '/api/state') return ok(res, await getState(url.searchParams.get('chain') || 'bsc'));
     if (p === '/api/token') {
+      const chain = url.searchParams.get('chain') || 'bsc';
       const token = (url.searchParams.get('token') || '').trim();
       if (!token) return err(res, 400, '缺 token');
+      if (chain === 'rh') {
+        const info = await rhTokenInfo(token);
+        if (!info) return err(res, 404, 'mobster 查不到这个地址');
+        const bal = await rhTokenBalance(token);
+        return ok(res, {
+          chain: 'rh', address: token, found: true, symbol: info.symbol, name: info.name,
+          graduated: !!info.graduated, progressPct: Number(info.progressPct || 0),
+          priceBnb: Number(info.price || 0), priceUsd: Number(info.priceUsd || 0),
+          raisedBnb: Number(info.raised || 0), gradAmtBnb: Number(info.target || 0),
+          holders: info.holders ?? null, pair: info.pair || null, myBalance: bal,
+          quote: info.quote?.symbol || 'ETH', buyableByPad: !info.graduated,
+        });
+      }
+      if (chain === 'sol') {
+        const info = await solTokenInfo(token);
+        if (!info) return err(res, 404, 'DexScreener 查不到这个 mint（可能无流动性或地址不对）');
+        return ok(res, { chain: 'sol', address: token, found: true, symbol: info.symbol, name: info.name,
+          priceUsd: info.priceUsd, priceNative: info.priceNative, liquidityUsd: info.liquidityUsd,
+          volume24hUsd: info.volume24hUsd, pair: info.pair, dexId: info.dexId, quote: 'SOL' });
+      }
       const bnbAmt = Number(url.searchParams.get('bnb') || 0.1);
       // 1) gang.fun 官方接口（内盘 + 已毕业 都能查到）
       let info = null;
@@ -454,7 +625,31 @@ const server = createServer(async (req, res) => {
     if (p === '/api/buy' && req.method === 'POST') {
       const buyT0 = Date.now();
       const b = await readBody(req);
-      const token = b.token, bnbAmt = Number(b.bnb);
+      const token = b.token;
+      if (b.chain === 'rh') {
+        const eth = Number(b.amount);
+        if (!token || !(eth > 0)) return err(res, 400, '参数错');
+        try {
+          const r = await rhBuy(token, eth);
+          const pos = loadPos();
+          const key = token.toLowerCase();
+          const cur = pos[key] || { symbol: 'TOKEN', chain: 'rh', costBnb: 0 };
+          cur.symbol = (await rhTokenInfo(token))?.symbol || cur.symbol;
+          cur.chain = 'rh';
+          cur.costBnb = Number(cur.costBnb || 0) + eth;
+          pos[key] = cur; savePos(pos);
+          return ok(res, { ...r, spentEth: eth, elapsedMs: Date.now() - buyT0 });
+        } catch (e) { return err(res, 400, e.message); }
+      }
+      if (b.chain === 'sol') {
+        const qty = Number(b.amount);
+        if (!token || !(qty > 0)) return err(res, 400, '参数错');
+        try {
+          const r = await solSwap(qty, SOL_NATIVE, token, Number(b.slippage || 3));
+          return ok(res, { ...r, spentSol: qty, elapsedMs: Date.now() - buyT0 });
+        } catch (e) { return err(res, 400, e.message); }
+      }
+      const bnbAmt = Number(b.bnb);
       if (!token || !(bnbAmt > 0)) return err(res, 400, '参数错');
       let f = await findPad(token);
       if (!f) {
@@ -511,6 +706,26 @@ const server = createServer(async (req, res) => {
     }
     if (p === '/api/sell' && req.method === 'POST') {
       const b = await readBody(req);
+      if (b.chain === 'rh') {
+        const pct = Number(b.pct || 100);
+        try {
+          const r = await rhSell(b.token, pct);
+          const pos = loadPos();
+          const cur = pos[b.token.toLowerCase()];
+          if (cur) { cur.costBnb = Number(cur.costBnb || 0) * (1 - pct / 100); pos[b.token.toLowerCase()] = cur; savePos(pos); }
+          return ok(res, r);
+        } catch (e) { return err(res, 400, e.message); }
+      }
+      if (b.chain === 'sol') {
+        const pct = Number(b.pct || 100);
+        const bal = await solTokenBalance(b.token);
+        if (!(bal > 0)) return err(res, 400, '没有可卖余额');
+        const qty = pct >= 100 ? bal : (bal * pct / 100);
+        try {
+          const r = await solSwap(qty, b.token, SOL_NATIVE, Number(b.slippage || 3));
+          return ok(res, { ...r, sold: qty });
+        } catch (e) { return err(res, 400, e.message); }
+      }
       try {
         const r = await doSell(b.token, Number(b.pct || 100), Number(b.slippage ?? SLIPPAGE));
         return ok(res, r);
