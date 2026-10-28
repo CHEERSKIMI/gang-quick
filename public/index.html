@@ -99,6 +99,7 @@ const $ = (id) => document.getElementById(id);
 let curChain = 'bsc';
 let curToken = '';
 let lastFullBnb = null;
+let stateMem = {};
 
 async function j(url, opt) { const r = await fetch(url, opt); return r.json(); }
 
@@ -113,6 +114,7 @@ function setChain(c) {
   $('amount').value = c === 'bsc' ? '0.1' : '0.05';
   $('amount').placeholder = c === 'bsc' ? 'BNB 数量' : (c === 'rh' ? 'ETH 数量' : 'SOL 数量');
   renderPresets();
+  if (stateMem[c]) renderState(stateMem[c]);  // 立即用上次缓存渲染，再拉最新
   refresh();
   if (c !== 'sol') query();
 }
@@ -147,6 +149,12 @@ function renderPresets() {
 async function refresh() {
   try {
     const s = await j('/api/state?chain=' + curChain);
+    stateMem[s.chain] = s;
+    if (s.chain === curChain) renderState(s);
+  } catch (e) { $('err').textContent = '刷新失败: ' + e.message; }
+}
+
+function renderState(s) {
     $('quoteUnit').textContent = s.chain === 'rh' ? 'ETH' : (s.chain === 'sol' ? 'SOL' : 'BNB');
     if (s.chain === 'rh') {
       $('quoteUsd').textContent = (s.ethUsd || 0).toFixed(2);
@@ -206,7 +214,6 @@ async function refresh() {
         </td>
       </tr>`;
     }).join('');
-  } catch (e) { $('err').textContent = '刷新失败: ' + e.message; }
 }
 
 async function query() {

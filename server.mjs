@@ -19,7 +19,12 @@ const PADS = {
 const WBNB = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
 const USDT = '0x55d398326f99059fF775485246999027B3197955';
 const BNB = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
-const RPCs = ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.io'];
+const RPCs = [
+  ...(process.env.BSC_RPC ? [process.env.BSC_RPC] : []),
+  'https://bsc-rpc.publicnode.com',
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-dataseed1.defibit.io',
+];
 // baw 路径：优先环境变量 → 本机默认 → 依赖 PATH 里的 `baw`
 const BAW_BIN = (() => {
   if (process.env.BAW_BIN) return process.env.BAW_BIN;
@@ -196,11 +201,13 @@ function mobster(args, { timeoutMs = 150_000 } = {}) {
   });
 }
 async function rhTokenInfo(token) {
-  try {
-    const r = await fetch('https://mobster.meme/api/tokens/' + token, { headers: { accept: 'application/json' } });
-    if (r.status === 200) { const j = await r.json(); if (j?.address) return j; }
-  } catch {}
-  return null;
+  return cacheGet('rhtok:' + token.toLowerCase(), 10_000, async () => {
+    try {
+      const r = await fetch('https://mobster.meme/api/tokens/' + token, { headers: { accept: 'application/json' } });
+      if (r.status === 200) { const j = await r.json(); if (j?.address) return j; }
+    } catch {}
+    return null;
+  });
 }
 async function rhTokenBalance(token) {
   try {
@@ -410,8 +417,7 @@ async function getState(chain = 'bsc') {
     const positions = [];
     for (const [token, p] of Object.entries(pos)) {
       if ((p.chain || 'bsc') !== 'rh') continue;
-      const bal = await rhTokenBalance(token);
-      const info = await rhTokenInfo(token);
+      const [bal, info] = await Promise.all([rhTokenBalance(token), rhTokenInfo(token)]);
       const value = bal * Number(info?.price || 0);
       const cost = Number(p.costBnb || 0);
       const pnl = value - cost;
@@ -461,6 +467,10 @@ async function getState(chain = 'bsc') {
       costUsd: cost * bnbUsd, valueUsd: valueBnb * bnbUsd, pnlUsd: pnl * bnbUsd, auto: p.auto || null, chain: 'bsc' });
   }
   return { chain: 'bsc', addr, status, bnb, wbnb, usdt, bnbUsd, positions };
+}
+// 状态缓存（800ms）：切链/多标签同时刷新时去重，减少 RPC 压力
+function getStateCached(chain) {
+  return cacheGet('state:' + chain, 800, () => getState(chain));
 }
 
 // ---------- 卖出（手动 + 自动策略共用） ----------
@@ -544,7 +554,7 @@ const server = createServer(async (req, res) => {
   if (p.startsWith('/api/') && req.method === 'POST') console.log(`[api] ${req.method} ${p}`);
   try {
     if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(HTML); }
-    if (p === '/api/state') return ok(res, await getState(url.searchParams.get('chain') || 'bsc'));
+    if (p === '/api/state') return ok(res, await getStateCached(url.searchParams.get('chain') || 'bsc'));
     if (p === '/api/token') {
       const chain = url.searchParams.get('chain') || 'bsc';
       const token = (url.searchParams.get('token') || '').trim();
