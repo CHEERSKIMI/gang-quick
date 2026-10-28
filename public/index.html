@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gang 内盘快速交易</title>
+<style>
+  :root { --bg:#0a0a0c; --card:#141419; --line:#26262e; --tx:#e8e8ea; --muted:#8a8a94; --g:#22c55e; --r:#ef4444; --y:#eab308; --accent:#3b82f6; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:14px/1.5 -apple-system,Segoe UI,Microsoft YaHei,sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  .grid { display:flex; gap:10px; flex-wrap:wrap; }
+  .kv { flex:1; min-width:150px; background:#0e0e12; border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .kv .k { color:var(--muted); font-size:12px; }
+  .kv .v { font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+  input, button { font:inherit; border-radius:8px; border:1px solid var(--line); background:#0e0e12; color:var(--tx); padding:8px 10px; }
+  input { width:100%; }
+  button { cursor:pointer; background:#1a1a22; }
+  button:hover { background:#22222c; }
+  .btn-buy { background:var(--g); color:#000; border:none; font-weight:700; }
+  .btn-sell { background:var(--r); color:#fff; border:none; font-weight:600; }
+  .btn-sm { padding:4px 10px; font-size:12px; margin-left:4px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  .pos { color:var(--g); } .neg { color:var(--r); }
+  .muted { color:var(--muted); font-size:12px; }
+  .row { display:flex; gap:10px; align-items:center; margin-bottom:10px; }
+  .row .grow { flex:1; }
+  .quote { margin-top:8px; color:var(--y); font-size:13px; }
+  .err { color:var(--r); margin-top:8px; font-size:13px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--g); margin-right:6px; }
+  .dot.off { background:var(--r); }
+  .hdr { display:flex; justify-content:space-between; align-items:center; }
+  .preset { background:#1a1a22; border:1px solid var(--line); }
+  .preset:hover { background:#22222c; }
+  .preset.active { border-color:var(--accent); color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Gang 内盘快速交易</h1>
+
+  <div class="card">
+    <div class="grid">
+      <div class="kv"><div class="k">钱包</div><div class="v" id="waddr" style="font-size:13px">…</div></div>
+      <div class="kv"><div class="k">BNB</div><div class="v" id="bnb">…</div></div>
+      <div class="kv"><div class="k">WBNB</div><div class="v" id="wbnb">…</div></div>
+      <div class="kv"><div class="k">USDT</div><div class="v" id="usdt">…</div></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="unwrapbtn">WBNB → BNB（解包）</button>
+      <button id="usdtbtn">USDT → BNB（兑换）</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div class="grow"><input id="token" placeholder="代币地址 0x…" value="0x608f17dd1689847cb0ec8d9d009b0f7c91c7451b"></div>
+      <button id="pastebtn">读取剪贴板</button>
+      <button id="qbtn">查询</button>
+    </div>
+    <div id="tinfo" class="muted">输入地址点「查询」查看盘面</div>
+    <div class="row" style="margin-top:10px">
+      <button class="preset" data-amt="0.05">0.05 BNB</button>
+      <button class="preset" data-amt="0.1">0.1 BNB</button>
+      <button class="preset" id="fillbtn">打满 1%</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div class="grow"><input id="bnbamt" type="number" step="0.01" min="0.01" value="0.1" placeholder="BNB 数量"></div>
+      <button class="btn-buy" id="buybtn" style="min-width:120px">买入</button>
+      <button id="xferbtn" style="min-width:140px">转出当前代币</button>
+    </div>
+    <div id="buyquote" class="quote"></div>
+    <div class="row" style="margin-top:8px">
+      <span class="muted">滑点</span>
+      <input id="slip" type="number" step="0.5" min="0.1" max="50" value="3" style="width:70px">
+      <span class="muted">%</span>
+      <span class="muted" style="margin-left:14px">刷新</span>
+      <select id="interval" style="background:#0e0e12;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:6px">
+        <option value="1000">1 秒</option>
+        <option value="2000">2 秒</option>
+        <option value="5000">5 秒</option>
+      </select>
+    </div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h2 style="font-size:15px;margin:0">持仓 <span class="muted">(每 1 秒刷新 · BNB ≈ $<span id="bnbusd">…</span>)</span></h2>
+      <button id="refreshbtn" class="btn-sm">手动刷新</button>
+    </div>
+    <table>
+      <thead><tr><th>代币</th><th>数量</th><th>成本(USDT)</th><th>市值(USDT)</th><th>盈亏(USDT)</th><th>收益率</th><th>自动策略</th><th style="text-align:right">操作</th></tr></thead>
+      <tbody id="posbody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let curToken = '';
+let lastFullBnb = null;
+
+async function j(url, opt) { const r = await fetch(url, opt); return r.json(); }
+
+async function refresh() {
+  try {
+    const s = await j('/api/state');
+    $('waddr').textContent = s.addr ? (s.addr.slice(0,6)+'…'+s.addr.slice(-4)) : '—';
+    $('bnb').textContent = s.bnb.toFixed(4);
+    $('wbnb').textContent = s.wbnb.toFixed(4);
+    $('usdt').textContent = s.usdt.toFixed(2);
+    if (s.bnbUsd) $('bnbusd').textContent = s.bnbUsd.toFixed(2);
+    const tb = $('posbody');
+    const list = s.positions.filter((p) => p.balance > 0);
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">暂无持仓</td></tr>'; return; }
+    tb.innerHTML = list.map((p) => {
+      const cls = p.pnlBnb >= 0 ? 'pos' : 'neg';
+      const sign = p.pnlBnb >= 0 ? '+' : '';
+      const autoOn = !!p.auto?.enabled;
+      const autoTxt = p.auto?.lastAction ? `<div class="muted">${p.auto.lastAction}</div>` : '';
+      return `<tr>
+        <td>${p.symbol}<div class="muted">${p.token.slice(0,6)}…${p.token.slice(-4)}</div></td>
+        <td>${p.balance.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+        <td>${(p.costUsd ?? 0).toFixed(2)}</td>
+        <td>${(p.valueUsd ?? 0).toFixed(2)}</td>
+        <td class="${cls}">${sign}${(p.pnlUsd ?? 0).toFixed(2)}</td>
+        <td class="${cls}">${sign}${p.pnlPct.toFixed(1)}%</td>
+        <td><label style="cursor:pointer"><input type="checkbox" ${autoOn ? 'checked' : ''} onchange="toggleAuto('${p.token}', this.checked)"> 涨100%卖50% / 跌50%清仓</label>${autoTxt}</td>
+        <td style="text-align:right">
+          <button class="btn-sm btn-sell" onclick="sell('${p.token}',10)">10%</button>
+          <button class="btn-sm btn-sell" onclick="sell('${p.token}',25)">25%</button>
+          <button class="btn-sm btn-sell" onclick="sell('${p.token}',50)">50%</button>
+          <button class="btn-sm btn-sell" onclick="sell('${p.token}',100)">100%</button>
+          <button class="btn-sm" onclick="transfer('${p.token}')">转出</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (e) { $('err').textContent = '刷新失败: ' + e.message; }
+}
+
+async function query() {
+  const token = $('token').value.trim();
+  if (!token) return;
+  curToken = token;
+  $('err').textContent = '';
+  try {
+    const t = await j('/api/token?token=' + encodeURIComponent(token) + '&bnb=' + ($('bnbamt').value || 0.1));
+    if (!t.ok) { $('tinfo').innerHTML = `<span class="neg">${t.error}</span>`; $('buyquote').textContent = ''; return; }
+    lastFullBnb = t.fullBnb || null;
+    if (t.graduated) {
+      $('tinfo').innerHTML = `<b>${t.symbol}</b>${t.name ? ' (' + t.name + ')' : ''} · <span class="pos">已毕业（外盘）</span><br>价格 ${t.priceBnb.toFixed(8)} BNB · 交易对 ${t.pair || '—'} · 持币 ${t.holders ?? '—'}<br><span class="muted">已毕业的币走外盘，买入会用 Binance DEX 聚合兑换</span>`;
+      $('buyquote').textContent = `花 ${$('bnbamt').value} BNB ≈ 外盘买入（数量以实际成交为准）`;
+      return;
+    }
+    $('tinfo').innerHTML = `<b>${t.symbol}</b>${t.name ? ' (' + t.name + ')' : ''} · 内盘 · pad ${t.pad || '—'}<br>已募 ${t.raisedBnb.toFixed(2)} / ${t.gradAmtBnb.toFixed(0)} BNB（${t.progressPct.toFixed(1)}%）· 持币 ${t.holders ?? '—'}`;
+    if (t.buyableByPad) {
+      $('buyquote').textContent = `花 ${$('bnbamt').value} BNB ≈ 买 ${t.tokensOut.toLocaleString(undefined,{maximumFractionDigits:2})} 枚（已持有 ${t.myBalance.toLocaleString(undefined,{maximumFractionDigits:2})}，还能买 ${t.room.toLocaleString(undefined,{maximumFractionDigits:2})}）`;
+    } else {
+      $('buyquote').textContent = `内盘但不在已知 pad 上（${t.pad || '无'}），暂不能直接买`;
+    }
+  } catch (e) { $('err').textContent = '查询失败: ' + e.message; }
+}
+
+async function buy() {
+  const token = $('token').value.trim();
+  const bnb = $('bnbamt').value;
+  if (!token || !(+bnb > 0)) { $('err').textContent = '填好地址和数量'; return; }
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(1);
+  $('err').textContent = '买入中… 已用 0.0s';
+  const timer = setInterval(() => { $('err').textContent = `买入中… 已用 ${secs()}s`; }, 100);
+  try {
+    const r = await j('/api/buy', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ token, bnb:+bnb, slippage: +($('slip')?.value || 3) }) });
+    clearInterval(timer);
+    const used = ((r.elapsedMs ?? (Date.now() - t0)) / 1000).toFixed(1);
+    if (!r.ok) { $('err').textContent = `买入失败（耗时 ${used}s）: ${r.error}`; return; }
+    $('err').textContent = '';
+    if (r.orderId) {
+      $('buyquote').textContent = `外盘买入已提交（${r.status}）· 订单 ${r.orderId} · 耗时 ${used}s`;
+    } else {
+      $('buyquote').textContent = `买入已提交（${r.status}）· 花费 ${r.spentBnb} BNB ≈ ${(r.tokensOut || 0).toLocaleString(undefined,{maximumFractionDigits:2})} 枚 · 耗时 ${used}s${r.txHash ? ' · ' + r.txHash : ''}`;
+    }
+    refresh();
+  } catch (e) { clearInterval(timer); $('err').textContent = `买入失败（耗时 ${secs()}s）: ${e.message}`; }
+}
+
+async function sell(token, pct) {
+  if (!confirm(`确认卖出 ${pct}% 的该持仓？`)) return;
+  $('err').textContent = '卖出中…';
+  try {
+    const r = await j('/api/sell', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ token, pct, slippage: +($('slip')?.value || 3) }) });
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    $('err').textContent = '';
+    if (r.orderId) {
+      $('buyquote').textContent = `外盘卖出已提交（${r.status}）· 订单 ${r.orderId}`;
+    } else {
+      $('buyquote').textContent = `卖出已提交（${r.status}）· 卖出 ${(r.soldTokens || 0).toLocaleString(undefined,{maximumFractionDigits:2})} 枚 ≈ ${(r.quoteOut || 0).toFixed(4)} WBNB${r.txHash ? ' · ' + r.txHash : ''}`;
+    }
+    refresh();
+  } catch (e) { $('err').textContent = '卖出失败: ' + e.message; }
+}
+
+async function toggleAuto(token, enabled) {
+  try {
+    const r = await j('/api/strategy', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ token, enabled }) });
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    $('err').textContent = '';
+    $('buyquote').textContent = enabled
+      ? '已开启自动策略：涨 100% 卖 50%，跌 50% 清仓（后台每 10 秒检查）'
+      : '已关闭该持仓的自动策略';
+    refresh();
+  } catch (e) { $('err').textContent = '设置失败: ' + e.message; }
+}
+
+async function transfer(token) {
+  const to = '0xF55FC5FC56a09716F4Bf77Adb890630cFB6b0de7';
+  if (!token) { $('err').textContent = '没有代币地址'; return; }
+  if (!confirm(`确认把该代币【全部余额】转出到 ${to}？`)) return;
+  $('err').textContent = '转出中…';
+  try {
+    const r = await j('/api/transfer', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ token }) });
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    $('err').textContent = '';
+    $('buyquote').textContent = `转出已提交（${r.status}）· ${r.amount.toLocaleString(undefined,{maximumFractionDigits:2})} 枚 → ${r.to}${r.txHash ? ' · ' + r.txHash : ''}`;
+    refresh();
+  } catch (e) { $('err').textContent = '转出失败: ' + e.message; }
+}
+
+async function unwrap() {
+  if (!confirm('把全部 WBNB 解包成原生 BNB？')) return;
+  $('err').textContent = '解包中…';
+  try {
+    const r = await j('/api/unwrap', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({}) });
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    $('err').textContent = '';
+    $('buyquote').textContent = `解包已提交（${r.status}）· ${r.amount} WBNB → BNB${r.txHash ? ' · ' + r.txHash : ''}`;
+    refresh();
+  } catch (e) { $('err').textContent = '解包失败: ' + e.message; }
+}
+async function usdt2bnb() {
+  if (!confirm('把全部 USDT 兑换成 BNB？')) return;
+  $('err').textContent = '兑换中…';
+  try {
+    const r = await j('/api/usdt2bnb', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({}) });
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    $('err').textContent = '';
+    $('buyquote').textContent = `USDT→BNB 已提交（${r.status}）· 订单 ${r.orderId || '—'}`;
+    refresh();
+  } catch (e) { $('err').textContent = '兑换失败: ' + e.message; }
+}
+
+$('qbtn').onclick = query;
+$('pastebtn').onclick = async () => {
+  $('err').textContent = '';
+  try {
+    const r = await j('/api/clipboard');
+    if (!r.ok) { $('err').textContent = r.error; return; }
+    if (!r.address) { $('err').textContent = '剪贴板里没找到 0x 开头的代币地址'; return; }
+    $('token').value = r.address;
+    await query();
+  } catch (e) { $('err').textContent = '读取剪贴板失败: ' + e.message; }
+};
+document.querySelectorAll('.preset[data-amt]').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('.preset').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    $('bnbamt').value = b.dataset.amt;
+    buy(); // 点击即买入，不再需要点「买入」
+  };
+});
+$('fillbtn').onclick = async () => {
+  document.querySelectorAll('.preset').forEach((x) => x.classList.remove('active'));
+  $('fillbtn').classList.add('active');
+  if (!lastFullBnb) await query();
+  if (!lastFullBnb) { $('buyquote').textContent = '先查询一个内盘代币，才能算打满 1%'; return; }
+  $('bnbamt').value = lastFullBnb;
+  buy(); // 点击即买入
+};
+$('buybtn').onclick = buy;
+$('xferbtn').onclick = () => transfer($('token').value.trim());
+$('unwrapbtn').onclick = unwrap;
+$('usdtbtn').onclick = usdt2bnb;
+$('refreshbtn').onclick = async () => {
+  const b = $('refreshbtn');
+  b.textContent = '刷新中…';
+  await refresh();
+  b.textContent = '已刷新';
+  setTimeout(() => { b.textContent = '手动刷新'; }, 800);
+};
+refresh();
+let timer = setInterval(refresh, 1000);
+$('interval').onchange = () => { clearInterval(timer); timer = setInterval(refresh, Number($('interval').value) || 1000); };
+query();
+</script>
+</body>
+</html>

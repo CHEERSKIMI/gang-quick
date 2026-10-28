@@ -1,0 +1,15 @@
+{
+  "0x608f17dd1689847cb0ec8d9d009b0f7c91c7451b": {
+    "symbol": "SMK5C",
+    "costBnb": 0.05,
+    "auto": {
+      "enabled": true,
+      "tpPct": 100,
+      "tpSellPct": 50,
+      "slPct": -50,
+      "slSellPct": 100,
+      "tpDone": false,
+      "slDone": false
+    }
+  }
+}
