@@ -168,7 +168,13 @@ async function sendContract({ to, valueWei = '0', inputData, label }) {
 }
 
 // ---------- 多网络：Robinhood Chain（mobster.meme，走 mobster CLI）+ Solana ----------
-const MOBSTER_BAW = process.env.MOBSTER_BAW || 'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\store\\v11\\links\\@binance\\agentic-wallet\\1.11.0\\52b7c8749335ffe66ec06014f9984df54a950ce82955bf6c18d464f0eee3bc10\\node_modules\\@binance\\agentic-wallet\\dist\\index.js';
+// MOBSTER_BAW：优先环境变量 → 本机默认（存在才用）→ 空（让 mobster 自己探测）
+const MOBSTER_BAW = (() => {
+  if (process.env.MOBSTER_BAW) return process.env.MOBSTER_BAW;
+  const winDefault = 'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\store\\v11\\links\\@binance\\agentic-wallet\\1.11.0\\52b7c8749335ffe66ec06014f9984df54a950ce82955bf6c18d464f0eee3bc10\\node_modules\\@binance\\agentic-wallet\\dist\\index.js';
+  try { if (existsSync(winDefault)) return winDefault; } catch {}
+  return '';
+})();
 const MOBSTER_V3_PAD = process.env.MOBSTER_V3_PAD || '0x4ED0f046D97d508df86D6B7B058E763DbFb0027f';
 const MOBSTER_ROUTER = process.env.MOBSTER_ROUTER || '0x481F370040084ED9977b6ED4140b3188d95CaDCf';
 const RH_RPC = process.env.MOBSTER_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
@@ -176,7 +182,8 @@ const RH_CHAIN = '4663', SOL_CHAIN = 'CT_501';
 
 function mobster(args, { timeoutMs = 150_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, MOBSTER_BAW, MOBSTER_V3_PAD, MOBSTER_ROUTER };
+    const env = { ...process.env, MOBSTER_V3_PAD, MOBSTER_ROUTER };
+    if (MOBSTER_BAW) env.MOBSTER_BAW = MOBSTER_BAW;
     env.PATH = buildPath();
     const child = execFile('mobster', [...args], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env, shell: true }, (err, stdout, stderr) => {
       const text = String(stdout || '').trim();
