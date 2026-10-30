@@ -135,3 +135,18 @@ gang withdraw --token <token> --all            # 发行前按 mint 价退回
 
 **Windows 补丁**：`@gangfun/cli` 的 `src/baw.js` 用 `execFileSync('baw')` 直连，而 Windows 下 Node/libuv 不能直接执行 `baw.cmd`（报 `baw not installed or not on PATH`）。已在该调用加 `shell: process.platform === 'win32'`。**`npm i -g` 升级后会被覆盖，需要重新打一次。**
 
+### 本机的 Git / 推送环境（这台机器原本没有 git）
+
+| 组件 | 位置 |
+|---|---|
+| MinGit 2.56（便携版，无需安装） | `~/.dsh/tools/mingit/cmd/git.exe` |
+| GitHub CLI 2.103.3 | `~/.dsh/tools/gh/bin/gh.exe`（已设备码授权，身份 CHEERSKIMI） |
+| 凭据助手 | `credential.https://github.com.helper = !'…/gh.exe' auth git-credential`，已写入全局 gitconfig |
+
+直连 `github.com:443` 时通时不通（`fetch` 匿名可用，`push` 经常连不上），推送走本地代理更稳：
+
+```bash
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push
+```
+
+
