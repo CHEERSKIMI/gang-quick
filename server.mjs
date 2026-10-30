@@ -66,9 +66,13 @@ const SLIPPAGE = Number(process.env.SLIPPAGE || 3);
 const RECIPIENT = process.env.TRANSFER_TO || '0xF55FC5FC56a09716F4Bf77Adb890630cFB6b0de7';
 // 双账号：A 主号（默认会话），B 小号（独立会话目录）
 const ACCOUNTS = {
-  A: { addr: process.env.ACCT_A_ADDR || '0x176283F80e337CE6725578b039B6b305A27b4535', dir: null },
-  // B 小号：独立会话目录（BINANCE_BAW_DIR 指向 account2 profile）
-  B: { addr: process.env.ACCT_B_ADDR || '0xB24619585f0Df28367554305CC16e293aA23b143', dir: process.env.ACCT_B_DIR || path.join(DSH_DIR, 'baw-profiles', 'account2') },
+  A: { addr: process.env.ACCT_A_ADDR || '0x176283F80e337CE6725578b039B6b305A27b4535', dir: null, bin: process.env.ACCT_A_BIN || null },
+  // B 小号：独立会话目录 + 独立入口（baw2 shim 自己会设 BINANCE_BAW_DIR=account2）
+  B: {
+    addr: process.env.ACCT_B_ADDR || '0xB24619585f0Df28367554305CC16e293aA23b143',
+    dir: process.env.ACCT_B_DIR || path.join(DSH_DIR, 'baw-profiles', 'account2'),
+    bin: process.env.ACCT_B_BIN || 'baw2',
+  },
 };
 
 // ---------- keccak ----------
@@ -139,11 +143,13 @@ const ceilDiv = (a, b) => (a + b - 1n) / b;
 const minOut = (v, s) => (v * BigInt(10000 - Math.min(9900, Math.round(s * 100)))) / 10000n;
 
 // ---------- baw ----------
-function bawOnce(args, { timeoutMs = 120_000, extraEnv = {} } = {}) {
+// bin：用哪个 baw 入口。多账号时不能只靠 BINANCE_BAW_DIR —— 本机的 baw.cmd / baw2.cmd
+// 内部自带 set BINANCE_BAW_DIR，bash-run 时会把外部传入的环境变量覆盖掉。
+function bawOnce(args, { timeoutMs = 120_000, extraEnv = {}, bin = BAW_BIN } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, ...extraEnv };
     env.PATH = buildPath();
-    const child = execFile(BAW_BIN, ['--json', ...args], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env, shell: true }, (err, stdout, stderr) => {
+    const child = execFile(bin, ['--json', ...args], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env, shell: true }, (err, stdout, stderr) => {
       const text = String(stdout || '').trim();
       let j = null; try { j = JSON.parse(text); } catch {}
       if (err) return reject(new Error((j?.error?.message) || String(stderr || err.message).slice(0, 400)));
@@ -179,13 +185,13 @@ async function marketSwap(fromTokenQty, fromToken, toToken) {
 }
 // baw 预演偶尔把「可以执行」的交易判成 execution reverted（同一份 calldata 重试即成功），
 // 所以预览失败时重试一次，避免 /api/transfer 这类一次性动作被误杀
-async function previewCall(args) {
+async function previewCall(args, opts = {}) {
   try {
-    return await baw(args);
+    return await baw(args, opts);
   } catch (e) {
     if (/simulation failed|execution reverted/i.test(String(e.message || ''))) {
       await new Promise((r) => setTimeout(r, 800));
-      return await baw(args);
+      return await baw(args, opts);
     }
     throw e;
   }
@@ -1009,11 +1015,12 @@ const server = createServer(async (req, res) => {
       const amt = b.amount ? BigInt(Math.round(Number(b.amount) * 1e18)) : bal;
       if (amt <= 0n || amt > bal) return err(res, 400, '数量非法');
       const inputData = ABI.transfer(RECIPIENT, amt);
-      const extraEnv = acct.dir ? { BINANCE_BAW_DIR: acct.dir } : {};
+      // 优先用账号自己的 baw 入口（B 号 = baw2）；只有没有入口时才退回 BINANCE_BAW_DIR
+      const bawOpts = acct.bin ? { bin: acct.bin } : { extraEnv: acct.dir ? { BINANCE_BAW_DIR: acct.dir } : {} };
       try {
-        const pre = (await baw(['contract-call', 'preview', '--binanceChainId', '56', '--from', acct.addr, '--to', token, '--value', '0', '--inputData', inputData], { extraEnv })).data || {};
+        const pre = (await previewCall(['contract-call', 'preview', '--binanceChainId', '56', '--from', acct.addr, '--to', token, '--value', '0', '--inputData', inputData], bawOpts)).data || {};
         if (!pre.requestId) return err(res, 500, '预演未返回 requestId');
-        const ex = (await baw(['contract-call', 'execute', '--requestId', pre.requestId], { extraEnv })).data || {};
+        const ex = (await baw(['contract-call', 'execute', '--requestId', pre.requestId], bawOpts)).data || {};
         return ok(res, { status: ex.status, txHash: ex.txHash, amount: Number(amt) / 1e18, from: acct.addr, to: RECIPIENT });
       } catch (e) { return err(res, 500, e.message); }
     }

@@ -135,6 +135,23 @@ gang withdraw --token <token> --all            # 发行前按 mint 价退回
 
 **Windows 补丁**：`@gangfun/cli` 的 `src/baw.js` 用 `execFileSync('baw')` 直连，而 Windows 下 Node/libuv 不能直接执行 `baw.cmd`（报 `baw not installed or not on PATH`）。已在该调用加 `shell: process.platform === 'win32'`。**`npm i -g` 升级后会被覆盖，需要重新打一次。**
 
+### 多账号（A/B）在这台机器上的坑
+
+本机的 `baw.cmd` / `baw2.cmd` 两个 shim **各自内部 `set BINANCE_BAW_DIR=...`**，会覆盖外部传入的同名环境变量：
+
+```
+baw  + BINANCE_BAW_DIR=account2  ->  仍然是 A 的地址 0x1762…4535
+```
+
+所以切 B 号**不能只设环境变量**，必须换入口：`ACCOUNTS.B.bin = 'baw2'`（可用 `ACCT_B_BIN` 覆盖）。改之前的老写法会让「B 转出」实际用 A 的钱包签名——已修（提交 `fix A/B 串号`）。
+
+两个账号的登录互不影响，各自独立扫码：
+
+```bash
+baw  auth signin && baw  auth verify --qrCodeId <id>   # A
+baw2 auth signin && baw2 auth verify --qrCodeId <id>   # B
+```
+
 ### 本机的 Git / 推送环境（这台机器原本没有 git）
 
 | 组件 | 位置 |
