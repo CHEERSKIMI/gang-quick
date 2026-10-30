@@ -47,7 +47,6 @@
     <button class="tab" id="tabBsc" onclick="setChain('bsc')">BNB 链（gang.fun）</button>
     <button class="tab opt" data-opt="rh" id="tabRh" onclick="setChain('rh')">Robinhood（mobster）</button>
     <button class="tab opt" data-opt="sol" id="tabSol" onclick="setChain('sol')">Solana</button>
-    <button class="tab opt" data-opt="discover" id="tabDiscover" onclick="setChain('discover')">🔥 发现</button>
     <button class="tab opt" data-opt="accounts" id="tabAccts" onclick="setChain('accounts')">👥 A/B 账户</button>
     <button class="tab" id="settingsBtn" onclick="toggleSettings()" title="选择显示哪些标签">⚙</button>
   </div>
@@ -55,7 +54,6 @@
     <div style="font-size:12px;color:#8a8a94;margin-bottom:6px">选择显示哪些标签（BNB 固定）</div>
     <label style="display:block;margin:4px 0;cursor:pointer"><input type="checkbox" data-opt-toggle="rh"> Robinhood（mobster）</label>
     <label style="display:block;margin:4px 0;cursor:pointer"><input type="checkbox" data-opt-toggle="sol"> Solana</label>
-    <label style="display:block;margin:4px 0;cursor:pointer"><input type="checkbox" data-opt-toggle="discover"> 🔥 发现（监控 agent 在打）</label>
     <label style="display:block;margin:4px 0;cursor:pointer"><input type="checkbox" data-opt-toggle="accounts"> 👥 A/B 账户</label>
   </div>
 
@@ -105,19 +103,6 @@
   </div>
   </div>
 
-  <div class="card" id="discoverView" style="display:none">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-      <h2 style="font-size:15px;margin:0">BSC Agent 在打什么 <span class="muted" id="discoverSub">(24h 净流入 · 已过滤 meme)</span></h2>
-      <div style="display:flex;gap:6px;align-items:center">
-        <button class="btn-sm period" data-p="24h">24h</button>
-        <button class="btn-sm period" data-p="1h">1h</button>
-        <button class="btn-sm period" data-p="5m">5m</button>
-        <button id="discoverRefresh" class="btn-sm">刷新</button>
-      </div>
-    </div>
-    <div id="discoverBody" class="muted">加载中…</div>
-  </div>
-
   <div class="card" id="accountsView" style="display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h2 style="font-size:15px;margin:0">账号 A / B 持仓 <span class="muted">(转出到 <span id="accRecipient" class="mono">0xF55F…</span>)</span></h2>
@@ -135,7 +120,7 @@ let lastFullBnb = null;
 let stateMem = {};
 
 // 任意选择显示哪些标签（BNB 固定），记住到 localStorage
-const OPT_TABS = ['rh', 'sol', 'discover', 'accounts'];
+const OPT_TABS = ['rh', 'sol', 'accounts'];
 function getTabPrefs() {
   try { return JSON.parse(localStorage.getItem('gang-tabs') || 'null') || {}; } catch { return {}; }
 }
@@ -169,27 +154,17 @@ async function j(url, opt) { const r = await fetch(url, opt); return r.json(); }
 
 function setChain(c) {
   curChain = c;
-  const isDiscover = c === 'discover';
   const isAccounts = c === 'accounts';
   $('tabBsc').classList.toggle('active', c === 'bsc');
   $('tabRh').classList.toggle('active', c === 'rh');
   $('tabSol').classList.toggle('active', c === 'sol');
-  $('tabDiscover').classList.toggle('active', isDiscover);
   $('tabAccts').classList.toggle('active', isAccounts);
-  $('tradeCards').style.display = (isDiscover || isAccounts) ? 'none' : '';
-  $('discoverView').style.display = isDiscover ? '' : 'none';
+  $('tradeCards').style.display = isAccounts ? 'none' : '';
   $('accountsView').style.display = isAccounts ? '' : 'none';
-  if (isDiscover) {
-    loadDiscover();
-    if (!discoverTimer) discoverTimer = setInterval(() => loadDiscover(), 30000);
-    return;
-  }
   if (isAccounts) {
     loadAccounts();
-    if (discoverTimer) { clearInterval(discoverTimer); discoverTimer = null; }
     return;
   }
-  if (discoverTimer) { clearInterval(discoverTimer); discoverTimer = null; }
   $('xferbtn').style.display = c === 'bsc' ? '' : 'none';
   $('token').value = c === 'bsc' ? '0x608f17dd1689847cb0ec8d9d009b0f7c91c7451b' : (c === 'rh' ? '0xe0165a1b3d8f9e276b0746adcb9c7094cbd05785' : '');
   $('token').placeholder = c === 'sol' ? 'Solana mint 地址（Base58）' : '代币地址 0x…';
@@ -199,55 +174,6 @@ function setChain(c) {
   if (stateMem[c]) renderState(stateMem[c]);  // 立即用上次缓存渲染，再拉最新
   refresh();
   if (c !== 'sol') query();
-}
-
-let discoverPeriod = '24h';
-let discoverSeen = new Set();
-let discoverTimer = null;
-
-async function loadDiscover(period) {
-  if (period) discoverPeriod = period;
-  document.querySelectorAll('.period').forEach((x) => x.classList.toggle('active', x.dataset.p === discoverPeriod));
-  const b = $('discoverBody');
-  b.innerHTML = '加载中…';
-  try {
-    const r = await j('/api/discover?period=' + discoverPeriod);
-    if (!r.ok) { b.innerHTML = `<span class="neg">${r.error}</span>`; return; }
-    $('discoverSub').textContent = `(${discoverPeriod} 净流入 · 已过滤 meme · ${r.agentCount}/${r.total} 个 agent)`;
-    if (!r.list || !r.list.length) { b.innerHTML = '<div class="muted">当前无 agent 项目被聪明钱净买入</div>'; return; }
-    const cas = r.list.map((t) => t.ca);
-    const isNew = (ca) => !discoverSeen.has(ca);
-    discoverSeen = new Set(cas);
-    b.innerHTML = r.list.map((t) => {
-      const cls = t.inflow >= 0 ? 'pos' : 'neg';
-      const newTag = isNew(t.ca) ? '<span style="color:var(--y);font-size:11px;margin-left:6px">NEW</span>' : '';
-      const links = t.links && t.links.length
-        ? t.links.map((l) => `<a href="${l.url}" target="_blank" rel="noreferrer" style="color:var(--accent);margin-right:8px">${l.label === 'x' ? '𝕏' : l.label}</a>`).join('')
-        : '<span class="muted">—</span>';
-      const risk = t.risk == null || t.risk === -1 ? '' : (t.risk === 1 ? '·低风险' : t.risk === 2 ? '·中风险' : '·<span class="neg">高风险</span>');
-      const mc = t.marketCap >= 1e6 ? (t.marketCap / 1e6).toFixed(2) + 'M' : (t.marketCap >= 1e3 ? (t.marketCap / 1e3).toFixed(1) + 'K' : t.marketCap.toFixed(0));
-      return `<div onclick="openToken('${t.ca}')" style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line);cursor:pointer">
-        ${t.icon ? `<img src="${t.icon}" style="width:34px;height:34px;border-radius:50%;object-fit:cover;flex:0 0 auto">` : `<div style="width:34px;height:34px;border-radius:50%;background:#1a1a22;flex:0 0 auto"></div>`}
-        <div style="flex:1;min-width:0">
-          <div style="font-weight:600">${t.name}${newTag}</div>
-          <div class="muted">${t.ca ? t.ca.slice(0,6) + '…' + t.ca.slice(-4) : ''} ${risk}${t.platform ? ' · ' + t.platform : ''}</div>
-          <div style="margin-top:2px">${links}</div>
-        </div>
-        <div style="text-align:right;flex:0 0 auto">
-          <div class="${cls}" style="font-weight:600">${t.inflow >= 0 ? '+' : ''}${t.inflow >= 1000 ? (t.inflow/1000).toFixed(1)+'K' : t.inflow.toFixed(0)} $</div>
-          <div class="muted">净流入</div>
-        </div>
-        <div style="text-align:right;flex:0 0 auto">
-          <div class="${t.priceChange >= 0 ? 'pos' : 'neg'}" style="font-weight:600">${t.priceChange >= 0 ? '+' : ''}${t.priceChange.toFixed(1)}%</div>
-          <div class="muted">涨幅</div>
-        </div>
-        <div style="text-align:right;flex:0 0 auto">
-          <div>$${mc}</div>
-          <div class="muted">市值</div>
-        </div>
-      </div>`;
-    }).join('');
-  } catch (e) { b.innerHTML = `<span class="neg">加载失败: ${e.message}</span>`; }
 }
 
 function openToken(ca) {
@@ -265,12 +191,17 @@ async function loadAccounts() {
     if (!r.ok) { b.innerHTML = `<span class="neg">${r.error}</span>`; return; }
     if (r.recipient) $('accRecipient').textContent = r.recipient.slice(0, 6) + '…' + r.recipient.slice(-4);
     b.innerHTML = [r.A, r.B].map((acct) => {
-      const rows = acct.tokens.map((t) => `
-        <tr>
-          <td>${t.symbol}</td>
-          <td>${t.balance.toLocaleString(undefined,{maximumFractionDigits:4})}</td>
-          <td style="text-align:right"><button class="btn-sm" onclick="transferFromAccount('${acct.name}','${t.token}','${t.symbol}')">转出</button></td>
-        </tr>`).join('');
+      const rows = acct.tokens.map((t) => {
+        const hasBal = t.balance > 0;
+        const balText = hasBal ? t.balance.toLocaleString(undefined,{maximumFractionDigits:4}) : '0（已转出/无）';
+        const btn = hasBal ? `<button class="btn-sm" onclick="transferFromAccount('${acct.name}','${t.token}','${t.symbol}')">转出</button>` : '<span class="muted">—</span>';
+        const note = t.note ? `<div class="muted" style="font-size:11px">${t.note}</div>` : '';
+        return `<tr>
+          <td>${t.symbol}${note}</td>
+          <td>${balText}</td>
+          <td style="text-align:right">${btn}</td>
+        </tr>`;
+      }).join('');
       return `<div class="card" style="margin-bottom:12px">
         <h3 style="font-size:14px;margin:0 0 8px">账号 ${acct.name} <span class="muted">${acct.addr.slice(0,6)}…${acct.addr.slice(-4)}</span></h3>
         <div class="kv" style="margin-bottom:8px"><div class="k">BNB</div><div class="v">${acct.bnb.toFixed(6)}</div></div>
@@ -553,8 +484,6 @@ $('refreshbtn').onclick = async () => {
   b.textContent = '已刷新';
   setTimeout(() => { b.textContent = '手动刷新'; }, 800);
 };
-$('discoverRefresh').onclick = () => loadDiscover();
-document.querySelectorAll('.period').forEach((x) => { x.onclick = () => loadDiscover(x.dataset.p); });
 $('accountsRefresh').onclick = () => loadAccounts();
 setChain('rh');
 let timer = setInterval(refresh, 1000);

@@ -19,5 +19,11 @@
     "symbol": "CAP",
     "chain": "rh",
     "costBnb": 0
+  },
+  "0xea6c49f60620cefbd26294e65105b364e442309c": {
+    "symbol": "AGI",
+    "chain": "bsc",
+    "costBnb": 0.02,
+    "note": "agentai.meme 铸造"
   }
 }

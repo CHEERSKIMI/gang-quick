@@ -562,51 +562,58 @@ function runCli(cmd, params) {
     });
   });
 }
-async function discoverBsc(period = '24h') {
-  const j = await runCli('smart-money-inflow', { chainId: '56', period });
-  const agentPlatforms = ['flap', 'genius.fun', 'gang.fun', 'mobster', 'nonce', 'agent'];
-  const memePlatforms = ['four.meme', 'fourmeme', 'pulse', 'pump'];
-  const list = (j.data || [])
-    .map((t) => {
-      const platform = ((t.tokenTag && t.tokenTag['Launch Platform']) || []).map((x) => x.tagName).join(',');
-      const links = (t.link || []).map((l) => l.link || '').join(' ');
-      const isAgent = (() => {
-        const pl = platform.toLowerCase();
-        const tagKeys = Object.keys(t.tokenTag || {});
-        // 股票类（tokenized stocks）明确排除
-        if (tagKeys.some((k) => /tokenized stocks/i.test(k))) return false;
-        // 明确 meme 平台排除
-        if (memePlatforms.some((a) => pl.includes(a))) return false;
-        // agent 平台
-        if (agentPlatforms.some((a) => pl.includes(a))) return true;
-        // 链接指向 agent 平台（gang.fun / genius.fun / mobster / nonce / flap）
-        if (/gang\.fun|genius\.fun|mobster|nonce|flap/i.test(links)) return true;
-        // AI 相关标签
-        if (t.tokenTag && (t.tokenTag['AI Analysis'] || t.tokenTag['Alpha Points'])) return true;
-        // .ai 句柄
-        if (/\.ai(\/|$)/i.test(links) || /x\.com\/[^\/\s]+ai/i.test(links)) return true;
-        // 名称关键词
-        if (/(agent|ai|gpt|llm|agentic|autonomous|智能体)/i.test(t.tokenName || '')) return true;
-        return false;
-      })();
-      return {
-        name: t.tokenName || '',
-        ca: t.ca || '',
-        inflow: Number(t.inflow || 0),
-        priceChange: Number(t.priceChangeRate || 0),
-        price: Number(t.price || 0),
-        marketCap: Number(t.marketCap || 0),
-        volume: Number(t.volume || 0),
-        holders: Number(t.holders || 0),
-        risk: t.tokenRiskLevel,
-        platform,
-        icon: t.tokenIconUrl ? (t.tokenIconUrl.startsWith('http') ? t.tokenIconUrl : 'https://bin.bnbstatic.com' + t.tokenIconUrl) : '',
-        links: (t.link || []).map((l) => ({ label: l.label, url: l.link })).filter((l) => l.url),
-        isAgent,
-      };
-    })
-    .filter((t) => t.isAgent);
-  return { list, period, total: (j.data || []).length, agentCount: list.length };
+async function discoverBsc(period = '30m') {
+  // 主数据源：BSC 链上 agent/聪明钱 实时交易流（按时间窗口过滤）
+  const winSec = { '5m': 300, '30m': 1800, '1h': 3600, '24h': 86400 }[period] || 1800;
+  let trades;
+  try { trades = await agentTrades(winSec); } catch (e) { trades = { list: [], totalTrades: 0 }; }
+  const list = trades.list.map((t) => ({
+    name: t.name,
+    ca: t.ca,
+    inflow: t.netUsd,
+    priceChange: 0,
+    price: t.price,
+    marketCap: t.marketCap,
+    volume: 0,
+    holders: null,
+    risk: t.risk,
+    platform: `${t.buys}买/${t.sells}卖 · ${t.traders}个地址`,
+    icon: '',
+    links: [],
+    isAgent: true,
+    mine: false,
+    agentTrade: true,
+  }));
+  return { list, period, total: trades.totalTrades, agentCount: list.length, mineCount: 0 };
+}
+
+// BSC 链上 agent/聪明钱 实时交易流（baw tracker tx query --tag-type smy）
+const TRADE_SIDE = { 11: 'buy', 19: 'buy', 100002: 'buy', 100001: 'sell', 21: 'sell', 29: 'sell' };
+async function agentTrades(winSec = 1800) {
+  const r = await baw(['tracker', 'tx', 'query', '-c', '56', '--tag-type', 'smy'], { timeoutMs: 30000, attempts: 2 });
+  const now = Math.floor(Date.now() / 1000);
+  const rows = (r.data || []).filter((t) => now - Number(t.ts || 0) <= winSec);
+  const byCa = new Map();
+  for (const t of rows) {
+    if (!t.ca) continue;
+    const ca = t.ca.toLowerCase();
+    const side = TRADE_SIDE[t.tradeSideCategory] || 'buy';
+    const usd = Number(t.txUsdValue || 0);
+    let e = byCa.get(ca);
+    if (!e) {
+      e = { ca, name: t.tokenName || 'TOKEN', buys: 0, sells: 0, buyUsd: 0, sellUsd: 0, lastTs: 0, price: Number(t.currentPrice || t.tokenPrice || 0), marketCap: Number(t.marketCap || 0), risk: t.tokenRiskLevel, addrs: new Set() };
+      byCa.set(ca, e);
+    }
+    if (side === 'buy') { e.buys++; e.buyUsd += usd; } else { e.sells++; e.sellUsd += usd; }
+    e.lastTs = Math.max(e.lastTs, Number(t.ts || 0));
+    if (t.address) e.addrs.add(t.address);
+  }
+  const list = [...byCa.values()].map((e) => ({
+    ca: e.ca, name: e.name, buys: e.buys, sells: e.sells,
+    buyUsd: Math.round(e.buyUsd), sellUsd: Math.round(e.sellUsd), netUsd: Math.round(e.buyUsd - e.sellUsd),
+    lastTs: e.lastTs, price: e.price, marketCap: e.marketCap, risk: e.risk, traders: e.addrs.size,
+  })).sort((a, b) => b.lastTs - a.lastTs);
+  return { list, totalTrades: rows.length };
 }
 
 // ---------- 双账号：A/B 余额 + 持仓 ----------
@@ -619,23 +626,23 @@ async function getAccountState(name) {
     call(WBNB, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
     call(USDT, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
   ]);
-  // 持仓代币（positions.json 里记录过的 + 固定几个）
+  // 持仓代币（positions.json 里记录过的 + 固定几个，含 0 余额也展示，避免遗漏）
   const pos = loadPos();
   const tokens = [];
   const seen = new Set([WBNB.toLowerCase(), USDT.toLowerCase()]);
   for (const [token, p] of Object.entries(pos)) {
     const t = token.toLowerCase();
     if (seen.has(t)) continue;
+    if (p.chain && p.chain !== 'bsc') continue;  // 只展示 BSC 链的代币
     seen.add(t);
     let bal = 0;
     try { bal = Number(words(await call(token, ABI.balanceOf(addr)))[0]) / 1e18; } catch {}
-    tokens.push({ token, symbol: p.symbol || 'TOKEN', balance: bal });
+    tokens.push({ token, symbol: p.symbol || 'TOKEN', balance: bal, note: p.note || '' });
   }
-  // 只保留有余额的代币（加上 WBNB/USDT 始终显示）
   const out = [
     { token: WBNB, symbol: 'WBNB', balance: wbnb },
     { token: USDT, symbol: 'USDT', balance: usdt },
-    ...tokens.filter((t) => t.balance > 0),
+    ...tokens,
   ];
   return { name, addr, bnb, tokens: out };
 }
