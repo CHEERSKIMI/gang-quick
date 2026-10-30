@@ -10,7 +10,9 @@
       "slPct": -50,
       "slSellPct": 100,
       "tpDone": false,
-      "slDone": false
+      "slDone": true,
+      "lastAction": "止损 100% @ -59.2%",
+      "lastAt": 1793348270237
     }
   },
   "0xcb1df013265c283e4cb5a546623e20e86af0813e": {

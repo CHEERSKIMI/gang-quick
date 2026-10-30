@@ -15,6 +15,7 @@ const PADS = {
   '0xF81C4E51c48466c6025B0165b1Ea0F6978c712cb': 'V2-F81C',
   '0x60aee38576035E757deD30fF8db8A8DA476430C1': 'V2-60AE',
   '0x245a42ce8337dece0f1c04f8430c90c8d98b88e4': 'V2-245A',
+  '0x15cfd2dc8278fb87a1783ef42111618e20874365': 'V3-15CF',
 };
 const WBNB = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
 const USDT = '0x55d398326f99059fF775485246999027B3197955';
@@ -58,6 +59,11 @@ const FROM = process.env.FROM || '0x176283F80e337CE6725578b039B6b305A27b4535';
 const SLIPPAGE = Number(process.env.SLIPPAGE || 3);
 // 「转出」固定接收地址（可用 TRANSFER_TO 环境变量覆盖）
 const RECIPIENT = process.env.TRANSFER_TO || '0xF55FC5FC56a09716F4Bf77Adb890630cFB6b0de7';
+// 双账号：A 主号（默认会话），B 小号（独立会话目录）
+const ACCOUNTS = {
+  A: { addr: '0x176283F80e337CE6725578b039B6b305A27b4535', dir: null },
+  B: { addr: '0xB24619585f0Df28367554305CC16e293aA23b143', dir: 'C:\\Users\\chunh\\.baw-acct2' },
+};
 
 // ---------- keccak ----------
 const RC = [0x0000000000000001n,0x0000000000008082n,0x800000000000808an,0x8000000080008000n,0x000000000000808bn,0x0000000080000001n,0x8000000080008081n,0x8000000000008009n,0x000000000000008an,0x0000000000000088n,0x0000000080008009n,0x000000008000000an,0x000000008000808bn,0x800000000000008bn,0x8000000000008089n,0x8000000000008003n,0x8000000000008002n,0x8000000000000080n,0x000000000000800an,0x800000008000000an,0x8000000080008081n,0x8000000000008080n,0x0000000080000001n,0x8000000080008008n];
@@ -127,9 +133,9 @@ const ceilDiv = (a, b) => (a + b - 1n) / b;
 const minOut = (v, s) => (v * BigInt(10000 - Math.min(9900, Math.round(s * 100)))) / 10000n;
 
 // ---------- baw ----------
-function bawOnce(args, { timeoutMs = 120_000 } = {}) {
+function bawOnce(args, { timeoutMs = 120_000, extraEnv = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env };
+    const env = { ...process.env, ...extraEnv };
     env.PATH = buildPath();
     const child = execFile(BAW_BIN, ['--json', ...args], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env, shell: true }, (err, stdout, stderr) => {
       const text = String(stdout || '').trim();
@@ -287,7 +293,7 @@ async function findPad(token) {
   for (const [pad, name] of Object.entries(PADS)) {
     try {
       const w = words(await call(pad, ABI.curves(token)));
-      if (w[1] !== 0n) return { name, pad, curve: { creator: '0x' + w[0].toString(16).padStart(40, '0'), quote: '0x' + w[1].toString(16).padStart(40, '0'), real: w[2], sold: w[3], gradAmt: w[4], vQ: w[5] } };
+      if (w[1] !== 0n) return { name, pad, curve: { creator: '0x' + w[0].toString(16).padStart(40, '0'), quote: '0x' + w[1].toString(16).padStart(40, '0'), real: w[2], sold: w[3], gradAmt: w[4], vQ: w[5], graduated: (w[6] || 0n) === 1n } };
     } catch {}
   }
   return null;
@@ -544,6 +550,96 @@ async function checkAutoSell() {
   finally { stratBusy = false; }
 }
 
+// ---------- 发现（BSC 聪明钱在打什么） ----------
+const SKILL_CLI = 'C:\\Users\\chunh\\Documents\\deepseek-harness\\default-workspace\\.agents\\skills\\crypto-market-rank\\scripts\\cli.mjs';
+function runCli(cmd, params) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    env.PATH = buildPath();
+    execFile(process.execPath, [SKILL_CLI, cmd, JSON.stringify(params)], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, env }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(String(stderr || err.message).slice(0, 300)));
+      try { resolve(JSON.parse(String(stdout || '').trim())); } catch (e) { reject(new Error('discover 返回非 JSON')); }
+    });
+  });
+}
+async function discoverBsc(period = '24h') {
+  const j = await runCli('smart-money-inflow', { chainId: '56', period });
+  const agentPlatforms = ['flap', 'genius.fun', 'gang.fun', 'mobster', 'nonce', 'agent'];
+  const memePlatforms = ['four.meme', 'fourmeme', 'pulse', 'pump'];
+  const list = (j.data || [])
+    .map((t) => {
+      const platform = ((t.tokenTag && t.tokenTag['Launch Platform']) || []).map((x) => x.tagName).join(',');
+      const links = (t.link || []).map((l) => l.link || '').join(' ');
+      const isAgent = (() => {
+        const pl = platform.toLowerCase();
+        const tagKeys = Object.keys(t.tokenTag || {});
+        // 股票类（tokenized stocks）明确排除
+        if (tagKeys.some((k) => /tokenized stocks/i.test(k))) return false;
+        // 明确 meme 平台排除
+        if (memePlatforms.some((a) => pl.includes(a))) return false;
+        // agent 平台
+        if (agentPlatforms.some((a) => pl.includes(a))) return true;
+        // 链接指向 agent 平台（gang.fun / genius.fun / mobster / nonce / flap）
+        if (/gang\.fun|genius\.fun|mobster|nonce|flap/i.test(links)) return true;
+        // AI 相关标签
+        if (t.tokenTag && (t.tokenTag['AI Analysis'] || t.tokenTag['Alpha Points'])) return true;
+        // .ai 句柄
+        if (/\.ai(\/|$)/i.test(links) || /x\.com\/[^\/\s]+ai/i.test(links)) return true;
+        // 名称关键词
+        if (/(agent|ai|gpt|llm|agentic|autonomous|智能体)/i.test(t.tokenName || '')) return true;
+        return false;
+      })();
+      return {
+        name: t.tokenName || '',
+        ca: t.ca || '',
+        inflow: Number(t.inflow || 0),
+        priceChange: Number(t.priceChangeRate || 0),
+        price: Number(t.price || 0),
+        marketCap: Number(t.marketCap || 0),
+        volume: Number(t.volume || 0),
+        holders: Number(t.holders || 0),
+        risk: t.tokenRiskLevel,
+        platform,
+        icon: t.tokenIconUrl ? (t.tokenIconUrl.startsWith('http') ? t.tokenIconUrl : 'https://bin.bnbstatic.com' + t.tokenIconUrl) : '',
+        links: (t.link || []).map((l) => ({ label: l.label, url: l.link })).filter((l) => l.url),
+        isAgent,
+      };
+    })
+    .filter((t) => t.isAgent);
+  return { list, period, total: (j.data || []).length, agentCount: list.length };
+}
+
+// ---------- 双账号：A/B 余额 + 持仓 ----------
+async function getAccountState(name) {
+  const acct = ACCOUNTS[name];
+  if (!acct) return null;
+  const addr = acct.addr;
+  const [bnb, wbnb, usdt] = await Promise.all([
+    rpc('eth_getBalance', [addr, 'latest']).then((x) => Number(BigInt(x)) / 1e18).catch(() => 0),
+    call(WBNB, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
+    call(USDT, ABI.balanceOf(addr)).then((x) => Number(words(x)[0]) / 1e18).catch(() => 0),
+  ]);
+  // 持仓代币（positions.json 里记录过的 + 固定几个）
+  const pos = loadPos();
+  const tokens = [];
+  const seen = new Set([WBNB.toLowerCase(), USDT.toLowerCase()]);
+  for (const [token, p] of Object.entries(pos)) {
+    const t = token.toLowerCase();
+    if (seen.has(t)) continue;
+    seen.add(t);
+    let bal = 0;
+    try { bal = Number(words(await call(token, ABI.balanceOf(addr)))[0]) / 1e18; } catch {}
+    tokens.push({ token, symbol: p.symbol || 'TOKEN', balance: bal });
+  }
+  // 只保留有余额的代币（加上 WBNB/USDT 始终显示）
+  const out = [
+    { token: WBNB, symbol: 'WBNB', balance: wbnb },
+    { token: USDT, symbol: 'USDT', balance: usdt },
+    ...tokens.filter((t) => t.balance > 0),
+  ];
+  return { name, addr, bnb, tokens: out };
+}
+
 // ---------- HTTP ----------
 const HTML = readFileSync(path.join(__dir, 'public', 'index.html'), 'utf8');
 
@@ -596,14 +692,21 @@ const server = createServer(async (req, res) => {
       const raised = info ? Number(info.raisedBnb ?? info.raisedQuote ?? 0) : 0;
       const grad = info ? Number(info.gradAmtBnb ?? info.gradAmtQuote ?? 0) : 0;
       // 内盘以链上曲线为准（官方接口对部分盘有滞后）
-      const onchain = !!(f && !info?.graduated);
+      const onchain = !!(f && !f.curve.graduated && !info?.graduated);
+      const quoteSym = (a) => {
+        const x = String(a || '').toLowerCase();
+        if (x === WBNB.toLowerCase()) return 'WBNB';
+        if (x === '0x0c6302401aa5325c2e36f170f52c00b1d220b405') return 'GANG';
+        if (x === USDT.toLowerCase()) return 'USDT';
+        return 'TOKEN';
+      };
       const out = {
         address: token,
         found: !!info || !!f,
         track: info?.track || (f ? 'main' : null),
         symbol: info?.symbol || (f ? (await tokenMeta(token)).symbol : ''),
         name: info?.name || '',
-        graduated: !!info?.graduated,
+        graduated: !!(f?.curve?.graduated || info?.graduated),
         progressPct: onchain
           ? Number(f.curve.real) * 100 / (Number(f.curve.gradAmt) || 1)
           : (info ? Number(info.progressPct || 0) : 0),
@@ -615,25 +718,31 @@ const server = createServer(async (req, res) => {
         pad: f ? f.name : null,
         padAddr: f ? f.pad : null,
         myBalance: Number(bal) / 1e18,
-        buyableByPad: !!f && !info?.graduated,
+        buyableByPad: !!f && !(f.curve.graduated || info?.graduated),
+        quoteSymbol: f ? quoteSym(f.curve.quote) : (info?.quote?.symbol || ''),
       };
-      if (f && !info?.graduated) {
+      if (f && !f.curve.graduated && !info?.graduated) {
         const vt = await virtualToken(f.pad);
         const c = { ...f.curve, vt };
-        const tokensOut = quoteBuy(c, vt, BigInt(Math.round(bnbAmt * 1e18)));
+        const isWbnbQuote = c.quote.toLowerCase() === WBNB.toLowerCase();
         const room = words(await call(f.pad, ABI.walletRoom(token, FROM)))[0];
         out.quote = c.quote;
-        out.tokensOut = Number(tokensOut) / 1e18;
         out.room = Number(room) / 1e18;
-        // 打满 1% 需要的 BNB（反解曲线）
-        if (room > 0n) {
-          const K = c.vQ * vt;
-          const denom = c.vt - c.sold - room;
-          if (denom > 0n) {
-            const needNet = K / denom - (c.vQ + c.real);
-            const needIn = needNet > 0n ? (needNet * BPS) / (BPS - FEE) : 0n;
-            out.fullBnb = Math.ceil(Number(needIn) / 1e18 * 1.02 * 100) / 100; // 加 2% 余量，合约会自动退多余
+        // 只有当报价币是 WBNB 时，才能直接用 BNB 金额报价
+        if (isWbnbQuote) {
+          const tokensOut = quoteBuy(c, vt, BigInt(Math.round(bnbAmt * 1e18)));
+          out.tokensOut = Number(tokensOut) / 1e18;
+          if (room > 0n) {
+            const K = c.vQ * vt;
+            const denom = c.vt - c.sold - room;
+            if (denom > 0n) {
+              const needNet = K / denom - (c.vQ + c.real);
+              const needIn = needNet > 0n ? (needNet * BPS) / (BPS - FEE) : 0n;
+              out.fullBnb = Math.ceil(Number(needIn) / 1e18 * 1.02 * 100) / 100;
+            }
           }
+        } else {
+          out.tokensOut = null;  // 非 WBNB 计价（如 GANG），需要先换报价币
         }
       }
       if (!out.found) return err(res, 404, 'gang.fun 和链上曲线都查不到这个地址（确认是代币合约地址？）');
@@ -680,34 +789,57 @@ const server = createServer(async (req, res) => {
         const sw = await marketSwap(bnbAmt, BNB, token);
         return ok(res, { status: sw.status || 'submitted', orderId: sw.orderId, note: '已毕业，走外盘聚合兑换', spentBnb: bnbAmt, elapsedMs: Date.now() - buyT0 });
       }
+      // 曲线已毕业（migrated）：也走外盘聚合兑换
+      if (f.curve.graduated) {
+        const sw = await marketSwap(bnbAmt, BNB, token);
+        return ok(res, { status: sw.status || 'submitted', orderId: sw.orderId, note: '该币已毕业（已迁移到外盘），走聚合兑换', spentBnb: bnbAmt, elapsedMs: Date.now() - buyT0 });
+      }
       const pi = await padInfo(token);
       const pad = pi?.f?.pad || f.pad;
       const vt = pi?.vt || (await virtualToken(pad));
       const cw = words(await call(pad, ABI.curves(token)));
       const c = { quote: '0x' + cw[1].toString(16).padStart(40, '0'), real: cw[2], sold: cw[3], gradAmt: cw[4], vQ: cw[5], vt };
-      if (c.quote.toLowerCase() !== WBNB.toLowerCase()) return err(res, 400, '该盘报价币不是 WBNB，暂不支持');
+      const GANG = '0x0c6302401aa5325c2e36f170f52c00b1d220b405';
+      const isWbnb = c.quote.toLowerCase() === WBNB.toLowerCase();
+      const quoteSym = isWbnb ? 'WBNB' : (c.quote.toLowerCase() === GANG ? 'GANG' : 'TOKEN');
       const value = BigInt(Math.round(bnbAmt * 1e18));
       const room = words(await call(pad, ABI.walletRoom(token, FROM)))[0];
       if (room <= 0n) return err(res, 400, '已到单钱包 1% 上限');
       const slippage = Number(b.slippage ?? SLIPPAGE);
       const hashes = [];
-      // 1) 只在 WBNB 不够时才 wrap（省一笔交易）
-      let wbnbBal = words(await call(WBNB, ABI.balanceOf(FROM)))[0];
-      if (wbnbBal < value) {
-        const need = value - wbnbBal;
-        hashes.push((await sendContract({ to: WBNB, valueWei: need, inputData: ABI.deposit(), label: 'wrap' })).txHash);
-        const ok2 = await waitFor(async () => { const x = words(await call(WBNB, ABI.balanceOf(FROM)))[0]; return x >= value ? x : null; }, 8000);
-        wbnbBal = ok2 || words(await call(WBNB, ABI.balanceOf(FROM)))[0];
+      let spend;
+      if (isWbnb) {
+        // 1) 只在 WBNB 不够时才 wrap（省一笔交易）
+        let wbnbBal = words(await call(WBNB, ABI.balanceOf(FROM)))[0];
+        if (wbnbBal < value) {
+          const need = value - wbnbBal;
+          hashes.push((await sendContract({ to: WBNB, valueWei: need, inputData: ABI.deposit(), label: 'wrap' })).txHash);
+          const ok2 = await waitFor(async () => { const x = words(await call(WBNB, ABI.balanceOf(FROM)))[0]; return x >= value ? x : null; }, 8000);
+          wbnbBal = ok2 || words(await call(WBNB, ABI.balanceOf(FROM)))[0];
+        }
+        spend = wbnbBal < value ? wbnbBal : value;
+        if (spend <= 0n) return err(res, 500, 'WBNB 没到账');
+      } else {
+        // 非 WBNB 报价币（如 GANG）：先用 BNB 通过 Binance 聚合换成报价币
+        const before = words(await call(c.quote, ABI.balanceOf(FROM)))[0];
+        const sw = await marketSwap(Number(bnbAmt), BNB, c.quote);
+        if (sw.status === 'FAILED') return err(res, 500, `BNB→${quoteSym} 兑换失败`);
+        // 轮询等报价币到账（取增量）
+        const got = await waitFor(async () => {
+          const x = words(await call(c.quote, ABI.balanceOf(FROM)))[0];
+          return x > before ? x : null;
+        }, 30000, 1000);
+        const after = got || words(await call(c.quote, ABI.balanceOf(FROM)))[0];
+        spend = after > before ? after - before : 0n;
+        if (spend <= 0n) return err(res, 500, `BNB→${quoteSym} 还没到账（订单可能要几秒），请稍后重试`);
       }
-      const spend = wbnbBal < value ? wbnbBal : value;
-      if (spend <= 0n) return err(res, 500, 'WBNB 没到账');
-      // 2) 只在授权不够时才 approve（一次批较大额度，覆盖多笔）
-      let allow = words(await call(WBNB, ABI.allowance(FROM, pad)))[0];
+      // 2) 授权报价币给 pad（不够才授权，一次批较大额度）
+      let allow = words(await call(c.quote, ABI.allowance(FROM, pad)))[0];
       if (allow < spend) {
         const target = spend * 2n > 5n * 10n ** 17n ? spend * 2n : 5n * 10n ** 17n;
-        hashes.push((await sendContract({ to: WBNB, inputData: ABI.approve(pad, target), label: 'approve-wbnb' })).txHash);
-        const ok3 = await waitFor(async () => { const x = words(await call(WBNB, ABI.allowance(FROM, pad)))[0]; return x >= spend ? x : null; }, 8000);
-        allow = ok3 || words(await call(WBNB, ABI.allowance(FROM, pad)))[0];
+        hashes.push((await sendContract({ to: c.quote, inputData: ABI.approve(pad, target), label: 'approve-' + quoteSym })).txHash);
+        const ok3 = await waitFor(async () => { const x = words(await call(c.quote, ABI.allowance(FROM, pad)))[0]; return x >= spend ? x : null; }, 15000);
+        allow = ok3 || words(await call(c.quote, ABI.allowance(FROM, pad)))[0];
       }
       // 3) buy
       const out = quoteBuy(c, vt, spend);
@@ -719,7 +851,7 @@ const server = createServer(async (req, res) => {
       cur.symbol = (await tokenMeta(token)).symbol;
       cur.costBnb = (Number(cur.costBnb || 0) + Number(spend) / 1e18);
       pos[token.toLowerCase()] = cur; savePos(pos);
-      return ok(res, { status: r.status, txHash: r.txHash, spentBnb: Number(spend) / 1e18, tokensOut: Number(out) / 1e18, hashes: hashes.filter(Boolean), elapsedMs: Date.now() - buyT0 });
+      return ok(res, { status: r.status, txHash: r.txHash, spentBnb: Number(spend) / 1e18, spentQuote: Number(spend) / 1e18, quoteSymbol: quoteSym, tokensOut: Number(out) / 1e18, hashes: hashes.filter(Boolean), elapsedMs: Date.now() - buyT0 });
     }
     if (p === '/api/sell' && req.method === 'POST') {
       const b = await readBody(req);
@@ -805,6 +937,36 @@ const server = createServer(async (req, res) => {
         const m = text.match(/0x[0-9a-fA-F]{40}/);
         return ok(res, { text: text.slice(0, 200), address: m ? m[0] : null });
       } catch (e) { return err(res, 500, '读剪贴板失败: ' + e.message); }
+    }
+    if (p === '/api/discover') {
+      const period = url.searchParams.get('period') || '24h';
+      try { return ok(res, await discoverBsc(period)); } catch (e) { return err(res, 500, '发现失败: ' + e.message); }
+    }
+    if (p === '/api/accounts') {
+      try {
+        const [A, B] = await Promise.all([getAccountState('A'), getAccountState('B')]);
+        return ok(res, { A, B, recipient: RECIPIENT });
+      } catch (e) { return err(res, 500, '读取账号失败: ' + e.message); }
+    }
+    if (p === '/api/transfer-from' && req.method === 'POST') {
+      const b = await readBody(req);
+      const account = String(b.account || 'A').toUpperCase();
+      const acct = ACCOUNTS[account];
+      if (!acct) return err(res, 400, '账号参数错');
+      const token = b.token;
+      if (!token) return err(res, 400, '缺 token');
+      const bal = words(await call(token, ABI.balanceOf(acct.addr)))[0];
+      if (bal <= 0n) return err(res, 400, '该账号这个代币没有余额');
+      const amt = b.amount ? BigInt(Math.round(Number(b.amount) * 1e18)) : bal;
+      if (amt <= 0n || amt > bal) return err(res, 400, '数量非法');
+      const inputData = ABI.transfer(RECIPIENT, amt);
+      const extraEnv = acct.dir ? { BINANCE_BAW_DIR: acct.dir } : {};
+      try {
+        const pre = (await baw(['contract-call', 'preview', '--binanceChainId', '56', '--from', acct.addr, '--to', token, '--value', '0', '--inputData', inputData], { extraEnv })).data || {};
+        if (!pre.requestId) return err(res, 500, '预演未返回 requestId');
+        const ex = (await baw(['contract-call', 'execute', '--requestId', pre.requestId], { extraEnv })).data || {};
+        return ok(res, { status: ex.status, txHash: ex.txHash, amount: Number(amt) / 1e18, from: acct.addr, to: RECIPIENT });
+      } catch (e) { return err(res, 500, e.message); }
     }
     res.writeHead(404); res.end('not found');
   } catch (e) { err(res, 500, e.message || 'server error'); }
