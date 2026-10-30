@@ -25,5 +25,11 @@
     "chain": "bsc",
     "costBnb": 0.02,
     "note": "agentai.meme 铸造"
+  },
+  "0xcd412f1a25875bbb03b56018905695d930542c99": {
+    "symbol": "FLY",
+    "chain": "bsc",
+    "costBnb": 0,
+    "note": "gang.fun fly 份额盘 · 10 份 mint 后已全额转出到 0xF55F…0de7（tx 0x0ebf50da…1dd5）"
   }
 }

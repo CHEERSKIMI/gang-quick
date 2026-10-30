@@ -105,3 +105,33 @@ git pull
 2. **positions.json 会变**：买入/卖出/开自动策略都会写它。两台设备用 git 同步时，别同时在两台改，否则会冲突——**建议只用一台下单**，另一台只拉取查看。
 3. **同一钱包别同时在两台设备操作**：`baw` 每次交易会锁钱包，两台同时发单会互相顶。
 4. 如果另一台是 Windows，遇到 `spawn EINVAL`（`.cmd` 无法直接执行），代码里已用 `shell: true` 处理；如果 `baw` 装成了全局 npm，直接 `npm i -g` 后 `baw` 就在 PATH 里，自动识别。
+
+---
+
+## 四、本机 Windows 适配记录（2026-10-30）
+
+这台机器：`C:\Users\Administrator`，Node v24.22.1，无 git、无 pnpm。
+
+| 项 | 处理 |
+|---|---|
+| 代码里写死的旧机器路径 `C:\Users\chunh\...` | 全部改为按 `%USERPROFILE%` 解析（baw 可执行、子进程 PATH、B 小号 `baw-profiles\account2`、mobster 的 baw、发现 CLI） |
+| `baw` | 已装 1.11.0（`~/.dsh/tools/baw`），`baw` 走 account1 profile，已登录；BSC 地址 `0x1762…4535` |
+| 价格源 | `api.binance.com` 在本网络 Node 直连被 reset → 优先用镜像 `data-api.binance.vision`，失败再退回原域名，最后才用写死的兜底价 |
+| 不在经典 pad 上的币（如 fly 份额盘） | 原来估值 0 会显示 -100%；现在用 gang.fun 官方接口的场内价估值 |
+| 启动 | 双击 `start.cmd`，或 `node server.mjs` → http://127.0.0.1:8790 |
+| `mobster` CLI | 未安装 → RH 链（mobster）买卖不可用；只读行情仍可看 |
+| `crypto-market-rank` skill | 本机不存在，但 `runCli` 已是死代码，不影响运行 |
+
+### gang.fun 新「fly」份额盘（本工具不支持，用官方 CLI）
+
+`track: fly` 的币不在上面 5 个曲线 pad 上，`/api/buy` 会拒绝。官方通道：
+
+```bash
+npm i -g @gangfun/cli@latest
+gang preflight
+gang mint  --token <token> --shares <份数>     # 每份 0.002 BNB，maxPerTx 见接口
+gang withdraw --token <token> --all            # 发行前按 mint 价退回
+```
+
+**Windows 补丁**：`@gangfun/cli` 的 `src/baw.js` 用 `execFileSync('baw')` 直连，而 Windows 下 Node/libuv 不能直接执行 `baw.cmd`（报 `baw not installed or not on PATH`）。已在该调用加 `shell: process.platform === 'win32'`。**`npm i -g` 升级后会被覆盖，需要重新打一次。**
+

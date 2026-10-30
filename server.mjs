@@ -26,18 +26,23 @@ const RPCs = [
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
 ];
-// baw 路径：优先环境变量 → 本机默认 → 依赖 PATH 里的 `baw`
-const BAW_BIN = (() => {
-  if (process.env.BAW_BIN) return process.env.BAW_BIN;
-  const winDefault = 'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\bin\\baw.CMD';
-  try { if (existsSync(winDefault)) return winDefault; } catch {}
-  return 'baw';
-})();
+// ---------- 本机路径（跨机器自适应：按当前用户家目录解析，不写死某台机器） ----------
+const HOME = process.env.USERPROFILE || process.env.HOME || '';
+const DSH_DIR = path.join(HOME, '.dsh');
+const firstExisting = (list) => list.find((p) => { try { return existsSync(p); } catch { return false; } }) || '';
+// baw 路径：优先环境变量 → 本机常见安装位置 → 依赖 PATH 里的 `baw`
+const BAW_BIN = process.env.BAW_BIN || firstExisting([
+  path.join(DSH_DIR, 'tools', 'pnpm-global', 'bin', 'baw.CMD'),
+  path.join(DSH_DIR, 'baw-bin', 'baw.cmd'),
+]) || 'baw';
 // 构造子进程 PATH：只拼入本机真实存在的目录
 function buildPath() {
   const extra = [
-    'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\bin',
-    'C:\\Users\\chunh\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\bin',
+    path.join(DSH_DIR, 'tools', 'pnpm-global', 'bin'),
+    path.join(DSH_DIR, 'baw-bin'),
+    // 注意：不要把 tools\baw\node_modules\.bin 加进来 —— 那里的 baw.cmd 不设 BINANCE_BAW_DIR，
+    // 会抢在 WindowsApps 的 shim 前面，导致跑进空 profile（wallet status 变 UNCONNECTED）
+    path.join(DSH_DIR, 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'node', 'bin'),
   ].filter((d) => { try { return existsSync(d); } catch { return false; } });
   return extra.length ? extra.join(';') + ';' + (process.env.PATH || '') : (process.env.PATH || '');
 }
@@ -61,8 +66,9 @@ const SLIPPAGE = Number(process.env.SLIPPAGE || 3);
 const RECIPIENT = process.env.TRANSFER_TO || '0xF55FC5FC56a09716F4Bf77Adb890630cFB6b0de7';
 // 双账号：A 主号（默认会话），B 小号（独立会话目录）
 const ACCOUNTS = {
-  A: { addr: '0x176283F80e337CE6725578b039B6b305A27b4535', dir: null },
-  B: { addr: '0xB24619585f0Df28367554305CC16e293aA23b143', dir: 'C:\\Users\\chunh\\.baw-acct2' },
+  A: { addr: process.env.ACCT_A_ADDR || '0x176283F80e337CE6725578b039B6b305A27b4535', dir: null },
+  // B 小号：独立会话目录（BINANCE_BAW_DIR 指向 account2 profile）
+  B: { addr: process.env.ACCT_B_ADDR || '0xB24619585f0Df28367554305CC16e293aA23b143', dir: process.env.ACCT_B_DIR || path.join(DSH_DIR, 'baw-profiles', 'account2') },
 };
 
 // ---------- keccak ----------
@@ -171,8 +177,21 @@ async function walletAddresses() { try { return (await baw(['wallet', 'address']
 async function marketSwap(fromTokenQty, fromToken, toToken) {
   return (await baw(['market-order', 'swap', '--fromTokenQty', String(fromTokenQty), '--fromToken', fromToken, '--toToken', toToken, '--binanceChainId', '56', '--slippage', '3'])).data || {};
 }
+// baw 预演偶尔把「可以执行」的交易判成 execution reverted（同一份 calldata 重试即成功），
+// 所以预览失败时重试一次，避免 /api/transfer 这类一次性动作被误杀
+async function previewCall(args) {
+  try {
+    return await baw(args);
+  } catch (e) {
+    if (/simulation failed|execution reverted/i.test(String(e.message || ''))) {
+      await new Promise((r) => setTimeout(r, 800));
+      return await baw(args);
+    }
+    throw e;
+  }
+}
 async function sendContract({ to, valueWei = '0', inputData, label }) {
-  const pre = (await baw(['contract-call', 'preview', '--binanceChainId', '56', '--from', FROM, '--to', to, '--value', String(valueWei), '--inputData', inputData])).data || {};
+  const pre = (await previewCall(['contract-call', 'preview', '--binanceChainId', '56', '--from', FROM, '--to', to, '--value', String(valueWei), '--inputData', inputData])).data || {};
   if (!pre.requestId) throw new Error(`${label}: 预演未返回 requestId`);
   const ex = (await baw(['contract-call', 'execute', '--requestId', pre.requestId])).data || {};
   return { status: ex.status, txHash: ex.txHash || null, sim: pre.simulationResult };
@@ -180,12 +199,9 @@ async function sendContract({ to, valueWei = '0', inputData, label }) {
 
 // ---------- 多网络：Robinhood Chain（mobster.meme，走 mobster CLI）+ Solana ----------
 // MOBSTER_BAW：优先环境变量 → 本机默认（存在才用）→ 空（让 mobster 自己探测）
-const MOBSTER_BAW = (() => {
-  if (process.env.MOBSTER_BAW) return process.env.MOBSTER_BAW;
-  const winDefault = 'C:\\Users\\chunh\\.dsh\\tools\\pnpm-global\\store\\v11\\links\\@binance\\agentic-wallet\\1.11.0\\52b7c8749335ffe66ec06014f9984df54a950ce82955bf6c18d464f0eee3bc10\\node_modules\\@binance\\agentic-wallet\\dist\\index.js';
-  try { if (existsSync(winDefault)) return winDefault; } catch {}
-  return '';
-})();
+const MOBSTER_BAW = process.env.MOBSTER_BAW || firstExisting([
+  path.join(DSH_DIR, 'tools', 'baw', 'node_modules', '@binance', 'agentic-wallet', 'dist', 'index.js'),
+]) || '';
 const MOBSTER_V3_PAD = process.env.MOBSTER_V3_PAD || '0x4ED0f046D97d508df86D6B7B058E763DbFb0027f';
 const MOBSTER_ROUTER = process.env.MOBSTER_ROUTER || '0x481F370040084ED9977b6ED4140b3188d95CaDCf';
 const RH_RPC = process.env.MOBSTER_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
@@ -318,6 +334,20 @@ async function tokenMeta(token) {
     return { symbol: sym || 'TOKEN', decimals: dec };
   } catch { return { symbol: 'TOKEN', decimals: 18 }; }
 }
+// gang.fun 官方接口：给不在经典 pad 上的币（如 fly 份额盘）取符号 / 场内价
+async function gangTokenInfo(token) {
+  return cacheGet('gtok:' + String(token).toLowerCase(), 10_000, async () => {
+    for (const base of ['https://gang.fun/api/tokens/', 'https://gang.fun/api/stocks/tokens/']) {
+      try {
+        const r = await fetch(base + token, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(6000) });
+        if (r.status !== 200) continue;
+        const j = await r.json();
+        if (j && j.address) return j;
+      } catch {}
+    }
+    return null;
+  });
+}
 
 // ---------- 持仓持久化 ----------
 const posFile = path.join(__dir, 'positions.json');
@@ -373,14 +403,24 @@ async function padInfo(token) {
     return { f, vt };
   });
 }
-// BNB 的 USDT 价（60 秒缓存，多级兜底）
-async function getBnbUsd() {
-  return cacheGet('bnbUsd', 60_000, async () => {
+// 价格源：部分网络下 api.binance.com 会被 reset，官方镜像 data-api.binance.vision 可直连，优先用它
+const PRICE_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com', 'https://api1.binance.com', 'https://api2.binance.com'];
+async function binancePrice(symbol) {
+  for (const h of PRICE_HOSTS) {
     try {
-      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', { signal: AbortSignal.timeout(5000) });
+      const r = await fetch(`${h}/api/v3/ticker/price?symbol=${symbol}`, { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) continue;
       const j = await r.json();
       if (Number(j?.price) > 0) return Number(j.price);
     } catch {}
+  }
+  return 0;
+}
+// BNB 的 USDT 价（60 秒缓存，多级兜底）
+async function getBnbUsd() {
+  return cacheGet('bnbUsd', 60_000, async () => {
+    const p = await binancePrice('BNBUSDT');
+    if (p > 0) return p;
     try {
       const r2 = await fetch('https://gang.fun/api/tokens/0x0c6302401aa5325c2e36f170f52c00b1d220b405', { headers: { accept: 'application/json' } });
       const j2 = await r2.json();
@@ -393,22 +433,16 @@ async function getBnbUsd() {
 // ---------- ETH 的 USDT 价 ----------
 async function getEthUsd() {
   return cacheGet('ethUsd', 60_000, async () => {
-    try {
-      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT', { signal: AbortSignal.timeout(5000) });
-      const j = await r.json();
-      if (Number(j?.price) > 0) return Number(j.price);
-    } catch {}
+    const p = await binancePrice('ETHUSDT');
+    if (p > 0) return p;
     return 2350;
   });
 }
 // ---------- SOL 的 USDT 价 ----------
 async function getSolUsd() {
   return cacheGet('solUsd', 60_000, async () => {
-    try {
-      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', { signal: AbortSignal.timeout(5000) });
-      const j = await r.json();
-      if (Number(j?.price) > 0) return Number(j.price);
-    } catch {}
+    const p = await binancePrice('SOLUSDT');
+    if (p > 0) return p;
     return 200;
   });
 }
@@ -465,6 +499,14 @@ async function getState(chain = 'bsc') {
         const q = quoteSell({ ...curve, vt: pi.vt }, pi.vt, bal);
         valueBnb = Number(q.out) / 1e18;
       } catch {}
+    } else if (bal > 0n) {
+      // 不在经典 pad 上（如 gang.fun 新的 fly 份额盘）：用官方接口的场内价估值
+      const gi = await gangTokenInfo(token);
+      const px = Number(gi?.priceQuote ?? gi?.priceBnb ?? 0);
+      if (px > 0) {
+        valueBnb = (Number(bal) / 1e18) * px;
+        symbol = p.symbol || gi?.symbol || symbol;
+      }
     }
     const cost = Number(p.costBnb || 0);
     const pnl = valueBnb - cost;
@@ -551,7 +593,7 @@ async function checkAutoSell() {
 }
 
 // ---------- 发现（BSC 聪明钱在打什么） ----------
-const SKILL_CLI = 'C:\\Users\\chunh\\Documents\\deepseek-harness\\default-workspace\\.agents\\skills\\crypto-market-rank\\scripts\\cli.mjs';
+const SKILL_CLI = process.env.SKILL_CLI || path.join(HOME, 'Documents', 'deepseek-harness', 'default-workspace', '.agents', 'skills', 'crypto-market-rank', 'scripts', 'cli.mjs');
 function runCli(cmd, params) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
